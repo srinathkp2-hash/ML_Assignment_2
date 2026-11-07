@@ -66,5 +66,5 @@ The values below are from the included `train.py` run, using the fixed stratifie
 
 ## Live Streamlit App Link
 
-`\[STREAMLIT COMMUNITY CLOUD URL]`
+[\[STREAMLIT COMMUNITY CLOUD URL]](https://ml-assignment-2-srinath.streamlit.app/)
 
