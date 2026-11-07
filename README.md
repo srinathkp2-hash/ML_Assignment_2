@@ -19,7 +19,7 @@ The original Scikit-learn target is mapped so that malignant is the positive cla
 ## c. GitHub Repository Link
 
 Adding public GitHub repository URL here:
-`[\[GITHUB REPOSITORY URL]](https://github.com/srinathkp2-hash/ML_Assignment_2)`
+`https://github.com/srinathkp2-hash/ML_Assignment_2`
 
 ## d. Models used
 
