@@ -25,6 +25,7 @@ from sklearn.metrics import (
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "model"
+TEST_DATA_PATH = BASE_DIR / "test_data.csv"
 
 st.set_page_config(
     page_title="ML Classification Model Evaluator",
@@ -35,269 +36,418 @@ st.set_page_config(
 st.title("Machine Learning Classification Model Evaluator")
 
 st.write(
-    "Upload a labelled test CSV to evaluate five pre-trained "
-    "classification models. No model retraining is performed."
+    "Evaluate five pre-trained classification models "
+    "using the default test dataset or your own uploaded CSV. "
+    "No model retraining is performed."
 )
 
 # --------------------------------------------------
 # 2. Load model metadata
 # --------------------------------------------------
 
-with open(MODEL_DIR / "metadata.json", "r") as f:
-    metadata = json.load(f)
+@st.cache_data
+def load_metadata():
+    with open(MODEL_DIR / "metadata.json", "r") as f:
+        return json.load(f)
+
+
+metadata = load_metadata()
 
 model_names = list(metadata["models"].keys())
 feature_names = metadata["feature_names"]
 target_col = metadata["target_column"]
 
 # --------------------------------------------------
-# 3. Upload test dataset
+# 3. Load all five pre-trained models
 # --------------------------------------------------
 
+@st.cache_resource
+def load_models():
+
+    models = {}
+
+    for name, filename in metadata["models"].items():
+
+        model_path = MODEL_DIR / filename
+
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {filename}"
+            )
+
+        models[name] = joblib.load(model_path)
+
+    return models
+
+
+# --------------------------------------------------
+# 4. Dataset selection
+# --------------------------------------------------
+
+st.subheader("Test Dataset")
+
 uploaded_file = st.file_uploader(
-    "Upload test dataset (CSV)",
+    "Upload another test dataset (CSV) - Optional",
     type=["csv"]
 )
 
+try:
+
+    if uploaded_file is not None:
+
+        data = pd.read_csv(uploaded_file)
+
+        st.info(
+            f"Using uploaded dataset: {uploaded_file.name}"
+        )
+
+    else:
+
+        if not TEST_DATA_PATH.exists():
+            st.error(
+                "Default test_data.csv not found. "
+                "Please upload a test CSV file."
+            )
+            st.stop()
+
+        data = pd.read_csv(TEST_DATA_PATH)
+
+        st.success(
+            "Default test_data.csv loaded automatically."
+        )
+
+except Exception as exc:
+
+    st.error(f"Unable to load dataset: {exc}")
+    st.stop()
+
+
 st.caption(
-    f"Required input: {len(feature_names)} features and target "
-    f"column '{target_col}'. Target mapping: 0 = Benign, 1 = Malignant."
+    f"Required input: {len(feature_names)} features "
+    f"and target column '{target_col}'. "
+    "Target mapping: 0 = Benign, 1 = Malignant."
 )
 
 # --------------------------------------------------
-# 4. Evaluate uploaded data
+# 5. Validate dataset
 # --------------------------------------------------
 
-if uploaded_file is not None:
+required_columns = feature_names + [target_col]
 
-    try:
-        data = pd.read_csv(uploaded_file)
+missing_columns = [
+    col for col in required_columns
+    if col not in data.columns
+]
 
-        required_columns = feature_names + [target_col]
+if missing_columns:
 
-        missing_columns = [
-            col for col in required_columns
-            if col not in data.columns
-        ]
+    st.error(
+        "Missing required columns: "
+        + ", ".join(missing_columns)
+    )
+    st.stop()
 
-        if missing_columns:
-            st.error(
-                "Missing required columns: "
-                + ", ".join(missing_columns)
-            )
+if data.empty:
 
-        elif data.empty:
-            st.error("The uploaded CSV contains no rows.")
+    st.error("The dataset contains no rows.")
+    st.stop()
+
+
+X_test = data[feature_names].apply(
+    pd.to_numeric,
+    errors="coerce"
+)
+
+y_test = pd.to_numeric(
+    data[target_col],
+    errors="coerce"
+)
+
+if X_test.isna().any().any() or y_test.isna().any():
+
+    st.error(
+        "Features and target must contain valid numeric "
+        "values without missing entries."
+    )
+    st.stop()
+
+if (
+    not np.isfinite(X_test.to_numpy()).all()
+    or not np.isfinite(y_test.to_numpy()).all()
+):
+
+    st.error("Dataset contains infinite values.")
+    st.stop()
+
+if not set(y_test.unique()).issubset({0, 1}):
+
+    st.error(
+        "Target values must be 0 (Benign) or 1 (Malignant)."
+    )
+    st.stop()
+
+y_test = y_test.astype(int)
+
+# --------------------------------------------------
+# 6. Dataset information
+# --------------------------------------------------
+
+st.subheader("Dataset Overview")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Total Records", len(data))
+col2.metric("Total Features", len(feature_names))
+col3.metric("Target Classes", y_test.nunique())
+
+with st.expander("Preview Test Dataset"):
+
+    st.dataframe(
+        data.head(10),
+        use_container_width=True
+    )
+
+# --------------------------------------------------
+# 7. Load models and evaluate all five
+# --------------------------------------------------
+
+try:
+
+    models = load_models()
+
+    all_results = {}
+    all_predictions = {}
+
+    auc_available = len(y_test.unique()) == 2
+
+    for name, model in models.items():
+
+        predictions = model.predict(X_test)
+
+        if hasattr(model, "predict_proba"):
+
+            probabilities = model.predict_proba(X_test)[:, 1]
+
+        elif hasattr(model, "decision_function"):
+
+            probabilities = model.decision_function(X_test)
 
         else:
-            X_test = data[feature_names].apply(
-                pd.to_numeric, errors="coerce"
+
+            probabilities = None
+
+        if probabilities is not None and auc_available:
+
+            auc = roc_auc_score(
+                y_test,
+                probabilities
             )
 
-            y_test = pd.to_numeric(
-                data[target_col], errors="coerce"
+        else:
+
+            auc = np.nan
+
+        metrics = {
+
+            "Model": name,
+
+            "Accuracy": accuracy_score(
+                y_test,
+                predictions
+            ),
+
+            "AUC": auc,
+
+            "Precision": precision_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
+
+            "Recall": recall_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
+
+            "F1 Score": f1_score(
+                y_test,
+                predictions,
+                zero_division=0
+            ),
+
+            "MCC": matthews_corrcoef(
+                y_test,
+                predictions
             )
+        }
 
-            if X_test.isna().any().any() or y_test.isna().any():
-                st.error(
-                    "Features and target must contain valid numeric "
-                    "values without missing entries."
-                )
+        all_results[name] = metrics
+        all_predictions[name] = predictions
 
-            elif not np.isfinite(X_test.to_numpy()).all() or not np.isfinite(y_test.to_numpy()).all():
-                st.error("The uploaded data contains infinite values.")
+    # --------------------------------------------------
+    # 8. Comparison of all five models
+    # --------------------------------------------------
 
-            elif not set(y_test.unique()).issubset({0, 1}):
-                st.error("Target values must be 0 (Benign) or 1 (Malignant).")
+    st.divider()
 
-            else:
-                y_test = y_test.astype(int)
+    st.subheader("Comparison of All Five Models")
 
-                # AUC requires both target classes.
-                auc_available = len(y_test.unique()) == 2
+    results_df = pd.DataFrame(
+        list(all_results.values())
+    )
 
-                # --------------------------------------------------
-                # 5. Evaluate all five models
-                # --------------------------------------------------
+    st.dataframe(
+        results_df.round(4),
+        use_container_width=True,
+        hide_index=True
+    )
 
-                all_results = {}
-                all_predictions = {}
+    best_model = results_df.loc[
+        results_df["Accuracy"].idxmax(),
+        "Model"
+    ]
 
-                for name, filename in metadata["models"].items():
+    st.success(
+        f"Best model based on Accuracy: {best_model}"
+    )
 
-                    model_path = MODEL_DIR / filename
+    # --------------------------------------------------
+    # 9. Model selection dropdown
+    # --------------------------------------------------
 
-                    if not model_path.exists():
-                        raise FileNotFoundError(
-                            f"Model file not found: {filename}"
-                        )
+    st.divider()
 
-                    model = joblib.load(model_path)
+    st.subheader("Detailed Model Evaluation")
 
-                    predictions = model.predict(X_test)
+    selected_model = st.selectbox(
+        "Select Classification Model",
+        model_names
+    )
 
-                    probabilities = model.predict_proba(X_test)[:, 1]
+    selected_predictions = all_predictions[selected_model]
 
-                    metrics = {
-                        "Model": name,
-                        "Accuracy": accuracy_score(
-                            y_test, predictions
-                        ),
-                        "AUC": (
-                            roc_auc_score(y_test, probabilities)
-                            if auc_available else np.nan
-                        ),
-                        "Precision": precision_score(
-                            y_test, predictions, zero_division=0
-                        ),
-                        "Recall": recall_score(
-                            y_test, predictions, zero_division=0
-                        ),
-                        "F1": f1_score(
-                            y_test, predictions, zero_division=0
-                        ),
-                        "MCC": matthews_corrcoef(
-                            y_test, predictions
-                        )
-                    }
+    selected_metrics = all_results[selected_model]
 
-                    all_results[name] = metrics
-                    all_predictions[name] = predictions
+    st.write(
+        f"Evaluation results for **{selected_model}**"
+    )
 
-                # --------------------------------------------------
-                # 6. Display comparison of all models
-                # --------------------------------------------------
+    # --------------------------------------------------
+    # 10. Display evaluation metrics
+    # --------------------------------------------------
 
-                st.subheader("Comparison of All Five Models")
+    metric_columns = st.columns(6)
 
-                results_df = pd.DataFrame(
-                    list(all_results.values())
-                )
+    metric_names = [
+        "Accuracy",
+        "AUC",
+        "Precision",
+        "Recall",
+        "F1 Score",
+        "MCC"
+    ]
 
-                st.dataframe(
-                    results_df.round(4),
-                    use_container_width=True,
-                    hide_index=True
-                )
+    for col, metric in zip(
+        metric_columns,
+        metric_names
+    ):
 
-                best_model = results_df.loc[
-                    results_df["Accuracy"].idxmax(), "Model"
-                ]
+        value = selected_metrics[metric]
 
-                st.success(
-                    f"Highest accuracy on this uploaded dataset: {best_model}"
-                )
-
-                # --------------------------------------------------
-                # 7. Select a model for detailed evaluation
-                # --------------------------------------------------
-
-                st.subheader("Detailed Model Evaluation")
-
-                selected_model = st.selectbox(
-                    "Select classification model",
-                    model_names
-                )
-
-                selected_predictions = all_predictions[selected_model]
-
-                selected_metrics = all_results[selected_model]
-
-                metric_columns = st.columns(6)
-
-                for col, metric in zip(
-                    metric_columns,
-                    [
-                        "Accuracy", "AUC", "Precision",
-                        "Recall", "F1", "MCC"
-                    ]
-                ):
-                    value = selected_metrics[metric]
-
-                    col.metric(
-                        metric,
-                        f"{value:.4f}" if pd.notna(value) else "N/A"
-                    )
-
-                # --------------------------------------------------
-                # 8. Confusion matrix and classification report
-                # --------------------------------------------------
-
-                left, right = st.columns(2)
-
-                with left:
-
-                    st.subheader("Confusion Matrix")
-
-                    cm = confusion_matrix(
-                        y_test,
-                        selected_predictions,
-                        labels=[0, 1]
-                    )
-
-                    fig, ax = plt.subplots()
-
-                    ConfusionMatrixDisplay(
-                        confusion_matrix=cm,
-                        display_labels=[
-                            "Benign (0)",
-                            "Malignant (1)"
-                        ]
-                    ).plot(
-                        ax=ax,
-                        cmap="Blues",
-                        colorbar=False
-                    )
-
-                    plt.xticks(rotation=15)
-
-                    st.pyplot(fig)
-
-                    plt.close(fig)
-
-                with right:
-
-                    st.subheader("Classification Report")
-
-                    report = classification_report(
-                        y_test,
-                        selected_predictions,
-                        labels=[0, 1],
-                        target_names=[
-                            "Benign",
-                            "Malignant"
-                        ],
-                        output_dict=True,
-                        zero_division=0
-                    )
-
-                    report_df = pd.DataFrame(report).transpose()
-
-                    st.dataframe(
-                        report_df.round(4),
-                        use_container_width=True
-                    )
-
-                # --------------------------------------------------
-                # 9. Preview uploaded data
-                # --------------------------------------------------
-
-                with st.expander("Preview uploaded test data"):
-
-                    st.dataframe(
-                        data.head(10),
-                        use_container_width=True
-                    )
-
-    except Exception as exc:
-
-        st.error(
-            f"Could not evaluate the uploaded file: {exc}"
+        col.metric(
+            metric,
+            f"{value:.4f}" if pd.notna(value) else "N/A"
         )
 
-else:
+    # --------------------------------------------------
+    # 11. Confusion Matrix
+    # --------------------------------------------------
 
-    st.info(
-        "Upload the provided test_data.csv file to view "
-        "the evaluation results."
+    st.divider()
+
+    left, right = st.columns(2)
+
+    with left:
+
+        st.subheader("Confusion Matrix")
+
+        cm = confusion_matrix(
+            y_test,
+            selected_predictions,
+            labels=[0, 1]
+        )
+
+        fig, ax = plt.subplots(figsize=(5, 4))
+
+        ConfusionMatrixDisplay(
+            confusion_matrix=cm,
+            display_labels=[
+                "Benign (0)",
+                "Malignant (1)"
+            ]
+        ).plot(
+            ax=ax,
+            cmap="Blues",
+            colorbar=False
+        )
+
+        plt.xticks(rotation=15)
+
+        st.pyplot(fig)
+
+        plt.close(fig)
+
+    # --------------------------------------------------
+    # 12. Classification Report
+    # --------------------------------------------------
+
+    with right:
+
+        st.subheader("Classification Report")
+
+        report = classification_report(
+            y_test,
+            selected_predictions,
+            labels=[0, 1],
+            target_names=[
+                "Benign",
+                "Malignant"
+            ],
+            output_dict=True,
+            zero_division=0
+        )
+
+        report_df = pd.DataFrame(report).transpose()
+
+        st.dataframe(
+            report_df.round(4),
+            use_container_width=True
+        )
+
+    # --------------------------------------------------
+    # 13. Download evaluation results
+    # --------------------------------------------------
+
+    st.divider()
+
+    st.subheader("Download Results")
+
+    csv_results = results_df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        label="Download Model Comparison Results",
+        data=csv_results,
+        file_name="model_evaluation_results.csv",
+        mime="text/csv"
+    )
+
+    st.success("Model evaluation completed successfully!")
+
+except Exception as exc:
+
+    st.error(
+        f"Error during model evaluation: {exc}"
     )
